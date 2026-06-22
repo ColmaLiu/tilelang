@@ -1,6 +1,5 @@
 """TileLang Relax optimization pipeline."""
 
-from copy import deepcopy
 from itertools import product
 import logging
 import math
@@ -1945,7 +1944,7 @@ class GraphFuser:
             return self.mod
 
         ready_to_fuse: List[tvm.tir.function.PrimFunc] = [
-            tir.stmt_functor.renew_defs(deepcopy(self.mod[node.name]))
+            tir.stmt_functor.renew_defs(self.mod[node.name])
             for node in topo_sorted_nodes
         ]
 
@@ -2293,7 +2292,18 @@ class Tunner:
         self,
         tile_plans: List[_FusionTilePlan],
     ) -> tvm.IRModule:
-        mod = deepcopy(self.graph.mod)
+        def _copy_ir_module(mod: tvm.IRModule) -> tvm.IRModule:
+            funcs = {gv: func for gv, func in mod.functions_items()}
+            global_infos = getattr(mod, "global_infos", None)
+
+            if global_infos is not None:
+                try:
+                    return tvm.IRModule(funcs, attrs=mod.attrs, global_infos=global_infos)
+                except TypeError:
+                    pass
+
+            return tvm.IRModule(funcs, attrs=mod.attrs)
+        mod = _copy_ir_module(self.graph.mod)
         selected_tiles: Dict[CallTirNode, List[int]] = {}
         for tile_plan in tile_plans:
             selected_tiles.update(tile_plan.node_tiles)
@@ -2939,7 +2949,12 @@ def _apply_fusion_groups(
 def fuse_all(mod: tvm.IRModule, target, use_cuda_graph) -> tvm.IRModule:
     graph = GraphManager(mod)
     if not graph.has_fusion_edges():
-        return mod
+        # No fusion edges, but TIR kernels still need scheduling so they
+        # bear ``tir.is_scheduled`` before device codegen.  Create a
+        # lightweight Tunner that only applies the default schedule rules
+        # without running the fusion engine or benchmarking.
+        tunner = Tunner(graph, target, use_cuda_graph)
+        return tunner._schedule_mod_with_tile_plans([])
 
     tunner = Tunner(graph, target, use_cuda_graph)
     fusion_groups = Engine(graph, tunner).run()

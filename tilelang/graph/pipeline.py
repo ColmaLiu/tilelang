@@ -8,7 +8,11 @@ from tvm.target import Target
 from tilelang.graph.pattern_rewrite import PatternRewritePass
 from tilelang.graph.patterns import DEFAULT_PATTERNS
 from tilelang.graph.patterns.fused_rope import fuse_qk_rope_pass
-from tilelang.graph.passes import eliminate_reshape_kernels, fold_zero_binops
+from tilelang.graph.passes import (
+    eliminate_reshape_kernels,
+    fold_zero_binops,
+    reorder_pre_reduction_blocks,
+)
 from tilelang.relax import FuseTIR
 from tilelang.graph.fusion import fuse_all
 
@@ -51,6 +55,13 @@ def run_pipeline(mod: tvm.IRModule, target: Target,
         ])
         mod = seq1(mod)
 
+        # Reorder TIR blocks so reduction blocks (matmul, conv) come before
+        # independent injective blocks (dtype casts).  The converter may
+        # emit a bias cast before a linear/matmul, and FuseTIR preserves
+        # that ordering, which breaks schedule rules.
+        mod = _try_pass(mod, reorder_pre_reduction_blocks,
+                        "ReorderPreReductionBlocks")
+
         # LegalizeOps + FuseTIR can introduce call_tir(add_fn, [zero, x])
         # from broadcast/shape legalisation, so re-run after.
         mod = _try_pass(mod, fold_zero_binops, "FoldZeroBinops_post_fuse")
@@ -61,9 +72,9 @@ def run_pipeline(mod: tvm.IRModule, target: Target,
         mod = _try_pass(mod, eliminate_reshape_kernels,
                         "EliminateReshapeKernels")
 
-        print(mod)
+        # print(mod)
         mod = fuse_all(mod, target, use_cuda_graph)
-        print(mod)
+        # print(mod)
 
         lowering_passes = [
             relax.transform.RewriteDataflowReshape(),

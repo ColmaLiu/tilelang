@@ -93,6 +93,25 @@ def _grid_blocks(m_extent: int | None, n_extent: int | None,
     return -(-m // block_m) * -(-n // block_n)
 
 
+def _can_partition_warps(block_m: int, block_n: int, num_warps: int) -> bool:
+    """Return True when (block_m, block_n) can be partitioned across *num_warps* warps.
+
+    Each warp needs at least ``kMPerWarp`` = 16 elements along M and
+    ``kNPerWarp`` = 8 elements along N.  There must exist integers m, n
+    such that ``m * n == num_warps``, ``block_m >= m * 16``, and
+    ``block_n >= n * 8``.
+    """
+    kMPerWarp = 16
+    kNPerWarp = 8
+    for m in range(1, num_warps + 1):
+        if num_warps % m != 0:
+            continue
+        n = num_warps // m
+        if block_m >= m * kMPerWarp and block_n >= n * kNPerWarp:
+            return True
+    return False
+
+
 def _choose_tile_config(
     target: Target,
     block_stmt: tir.Block,
@@ -135,6 +154,12 @@ def _choose_tile_config(
             for bn in n_candidates:
                 smem = _shared_mem_bytes(bm, bn, block_k, num_stages, element_bytes)
                 if smem > smem_cap:
+                    continue
+                # A warp needs at least 16 elements on M and 8 on N.
+                # With num_warps warps, we must be able to find m,n such
+                # that m*n==num_warps, M/(m*16)>=1, N/(n*8)>=1.
+                num_warps = threads // 32
+                if not _can_partition_warps(bm, bn, num_warps):
                     continue
                 grid = _grid_blocks(m_extent, n_extent, bm, bn)
                 volume = bm * bn
@@ -179,6 +204,9 @@ def _choose_tile_config(
             for bn in n_candidates:
                 smem = _shared_mem_bytes(bm, bn, block_k, num_stages, element_bytes)
                 if smem > smem_cap:
+                    continue
+                num_warps = threads // 32
+                if not _can_partition_warps(bm, bn, num_warps):
                     continue
                 grid = _grid_blocks(m_extent, n_extent, bm, bn)
                 volume = bm * bn

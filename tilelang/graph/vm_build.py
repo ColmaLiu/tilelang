@@ -128,6 +128,8 @@ def _make_fallback_wrapper(op_fn, arg_template, kwargs):
         if is_inplace:
             return tvm_args[0]
         if isinstance(result, torch.Tensor):
+            if not result.is_contiguous():
+                result = result.contiguous()
             return _tvm_from_dlpack(result)
         return result
 
